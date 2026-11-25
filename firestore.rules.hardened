@@ -1,0 +1,23 @@
+// OPTIONAL - NOT DEPLOYED, NOT TESTED against your faculty/CA pages. Read TESTING_REPORT.md first.
+//
+// Your current firestore.rules lets ANY signed-in user create/update/delete ANY attendance record, so a
+// technical student could write "present" straight from the browser console and skip the verification server.
+// The verification server uses the Firebase Admin SDK and is NOT affected by these rules.
+//
+// This replacement for the `attendance` block only lets the faculty who OWNS the (server-created) session
+// write that session's records. Students can still READ attendance (History page) but can no longer write it.
+// Everything else in firestore.rules stays exactly as it is. Test in the Firebase Rules Playground / Emulator,
+// then try: start a session, mark all absent, mark a student manually, download the report, open History.
+// If some faculty/CA page writes attendance WITHOUT a session id, that write will be denied - keep the old rule until fixed.
+
+    match /attendance/{attendanceId} {
+      allow read: if isAuthenticated();
+
+      allow create: if isAuthenticated()
+        && request.resource.data.sessionId is number
+        && get(/databases/$(database)/documents/attendance_sessions/$(string(int(request.resource.data.sessionId)))).data.facultyEmail == getUserEmail();
+
+      allow update, delete: if isAuthenticated()
+        && resource.data.sessionId is number
+        && get(/databases/$(database)/documents/attendance_sessions/$(string(int(resource.data.sessionId)))).data.facultyEmail == getUserEmail();
+    }

@@ -1,0 +1,183 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ==========================================
+    // HELPER FUNCTIONS & AUTHENTICATION CHECKS
+    // ==========================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function getUserEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    function isDepartmentHOD(deptId) {
+      return isAuthenticated() && 
+        deptId != null && 
+        deptId != "" && 
+        get(/databases/$(database)/documents/departments/$(deptId)).data.currentHodEmail.lower() == getUserEmail();
+    }
+
+    // ==========================================
+    // 1. STUDENT LOGIN APPROVALS
+    // Students request login; CAs approve/reject per session; HOD reassigns on replacement
+    // ==========================================
+    match /student_login_requests/{requestId} {
+      allow create: if isAuthenticated() 
+        && request.resource.data.status == 'pending'
+        && request.resource.data.email.lower() == getUserEmail();
+
+      allow read: if isAuthenticated();
+
+      allow update: if isAuthenticated() && (
+        // Student self-action: strictly logging out or cancelling
+        (resource.data.email.lower() == getUserEmail() 
+          && request.resource.data.status in ['logged_out', 'cancelled'])
+        // CA / HOD action: user is not the student
+        || (resource.data.email.lower() != getUserEmail() && (
+          // CA approval or rejection
+          request.resource.data.status in ['approved', 'rejected']
+          // Or HOD / CA reassigning pending requests to active appointment
+          || (resource.data.status == 'pending' && request.resource.data.status == 'pending')
+        ))
+      );
+
+      allow delete: if isAuthenticated();
+    }
+
+    // ==========================================
+    // 2. STUDENT ROSTER
+    // Managed by authorized Class Advisors (CAs) and HODs
+    // ==========================================
+    match /students/{studentId} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAuthenticated();
+    }
+
+    // ==========================================
+    // 3. INSTITUTIONAL STAFF & TEACHERS
+    // Verified CAs, Faculty, and HODs (Managed by HOD)
+    // ==========================================
+    match /teachers/{teacherId} {
+      allow read: if isAuthenticated();
+
+      // Only department HOD or authorized institutional admin can create/delete teacher documents
+      allow create: if isAuthenticated() && (
+        (request.resource.data.departmentId != null && isDepartmentHOD(request.resource.data.departmentId))
+        || (request.resource.data.approvedBy != null && request.resource.data.approvedBy.lower() == getUserEmail())
+        || (request.resource.data.email.lower() == getUserEmail() && request.resource.data.role == 'hod')
+      );
+
+      allow update: if isAuthenticated() && (
+        // Department HOD updating staff
+        (resource.data.departmentId != null && isDepartmentHOD(resource.data.departmentId))
+        || (request.resource.data.departmentId != null && isDepartmentHOD(request.resource.data.departmentId))
+        || (resource.data.approvedBy != null && resource.data.approvedBy.lower() == getUserEmail())
+        // Self-update without privilege escalation
+        || (resource.data.email.lower() == getUserEmail() 
+            && request.resource.data.role == resource.data.role 
+            && request.resource.data.status == resource.data.status 
+            && request.resource.data.isCA == resource.data.isCA)
+      );
+
+      allow delete: if isAuthenticated() && (
+        (resource.data.departmentId != null && isDepartmentHOD(resource.data.departmentId))
+        || (resource.data.approvedBy != null && resource.data.approvedBy.lower() == getUserEmail())
+      );
+    }
+
+    // ==========================================
+    // 4. ATTENDANCE SESSIONS & RECORDS
+    // Conducted by Faculty and marked by students
+    // ==========================================
+    match /attendance/{attendanceId} {
+      allow read: if isAuthenticated();
+      
+      // Attendance can be created by student self-marking QR scan or by faculty/CA
+      allow create, update: if isAuthenticated();
+      allow delete: if isAuthenticated();
+    }
+
+    // ==========================================
+    // 5. CLASS TIMETABLE SCHEDULES
+    // Organized and scheduled by Class Advisors
+    // ==========================================
+    match /timetable/{periodId} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAuthenticated();
+    }
+
+    // ==========================================
+    // 6. INSTITUTIONAL REGISTRATION REQUESTS
+    // - CA Requests (ca_requests): Reviewed & approved strictly by HOD
+    // - Faculty Requests (faculty_requests): Reviewed & approved strictly by HOD
+    // - HOD Requests (hod_requests): Reviewed by administration
+    // ==========================================
+    match /ca_requests/{requestId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && request.resource.data.status == 'pending';
+      allow update, delete: if isAuthenticated();
+    }
+
+    match /faculty_requests/{requestId} {
+      allow read: if isAuthenticated();
+
+      // Applicants can only create pending registration requests with their own email
+      allow create: if isAuthenticated() 
+        && request.resource.data.status == 'pending'
+        && request.resource.data.approvalStatus == 'pending'
+        && request.resource.data.email.lower() == getUserEmail();
+
+      // Updates strictly restricted to the department HOD or applicant self-cancellation
+      allow update: if isAuthenticated() && (
+        // Department HOD of the requested department
+        (resource.data.departmentId != null && isDepartmentHOD(resource.data.departmentId))
+        || (resource.data.hodEmail != null && resource.data.hodEmail.lower() == getUserEmail())
+        // Applicant self-cancellation without status elevation
+        || (resource.data.email.lower() == getUserEmail() 
+            && request.resource.data.status in ['cancelled', 'withdrawn'])
+      );
+
+      // Deletion restricted to department HOD
+      allow delete: if isAuthenticated() && (
+        (resource.data.departmentId != null && isDepartmentHOD(resource.data.departmentId))
+        || (resource.data.hodEmail != null && resource.data.hodEmail.lower() == getUserEmail())
+      );
+    }
+
+    match /hod_requests/{requestId} {
+      allow read, create, update, delete: if isAuthenticated();
+    }
+
+    // ==========================================
+    // 7. CLASS ADVISOR APPOINTMENTS
+    // Managed strictly by HOD (Appoint, Replace, Revoke)
+    // ==========================================
+    match /ca_appointments/{appointmentId} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAuthenticated();
+    }
+
+    // ==========================================
+    // 8. DEPARTMENTS & MULTI-DEPARTMENT MANAGEMENT
+    // Central registry of institutional departments
+    // ==========================================
+    match /departments/{deptId} {
+      // Pre-auth read allowed for registration and login dropdowns
+      allow read: if true;
+      allow create, update: if isAuthenticated();
+      allow delete: if isAuthenticated();
+    }
+
+    // ==========================================
+    // 9. HEADS OF DEPARTMENTS (HODs)
+    // Dynamic HOD registry per department
+    // ==========================================
+    match /hods/{hodId} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAuthenticated();
+    }
+  }
+}
